@@ -12,6 +12,8 @@
 #include "util.h"
 #include "wallet.h"
 #include "walletdb.h"
+#include "bip39_english.h"
+#include "monocypher.h"
 
 using namespace std;
 using namespace json_spirit;
@@ -264,7 +266,7 @@ Value sendtoaddress(const Array& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 4)
         throw runtime_error(
             "sendtoaddress <blackcoinaddress> <amount> [comment] [comment-to]\n"
-            "<amount> is a real and is rounded to the nearest 0.000001"
+            "<amount> is a real and is rounded to the nearest 0.00000001"
             + HelpRequiringPassphrase());
 
     CBitcoinAddress address(params[0].get_str());
@@ -281,12 +283,169 @@ Value sendtoaddress(const Array& params, bool fHelp)
     if (params.size() > 3 && params[3].type() != null_type && !params[3].get_str().empty())
         wtx.mapValue["to"]      = params[3].get_str();
 
-    if (pwalletMain->IsLocked())
-        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Please enter the wallet passphrase with walletpassphrase first.");
+    EnsureWalletIsUnlocked();
 
     string strError = pwalletMain->SendMoneyToDestination(address.Get(), nAmount, wtx);
     if (strError != "")
         throw JSONRPCError(RPC_WALLET_ERROR, strError);
+
+    return wtx.GetHash().GetHex();
+}
+
+bool crypto_blacknet_sk_check_version(const uint8_t sk[32])
+{
+    return (sk[0] & 0xF0) == 0x10;
+}
+
+bool crypto_blacknet_mnemonic_sk(const SecureString& mnemonic, uint8_t sk[32])
+{
+    crypto_blake2b_general(sk, 32, NULL, 0, (const uint8_t*)mnemonic.data(), mnemonic.length());
+    return crypto_blacknet_sk_check_version(sk);
+}
+
+bool crypto_blacknet_mnemonic_keypair(const SecureString& mnemonic, uint8_t pk[32], uint8_t sk[32])
+{
+    if (!crypto_blacknet_mnemonic_sk(mnemonic, sk))
+        return false;
+    crypto_sign_public_key(pk, sk);
+    return true;
+}
+
+bool crypto_blacknet_mnemonic_check_version(const SecureString& mnemonic)
+{
+    uint8_t sk[32];
+    bool ret = crypto_blacknet_mnemonic_sk(mnemonic, sk);
+    crypto_wipe(sk, sizeof(sk));
+    return ret;
+}
+
+SecureString crypto_blacknet_mnemonic()
+{
+    const int words = 12; // 132 bits = 4 bits version + 128 bits seed
+    uint16_t seed[words];
+    SecureString mnemonic;
+    mnemonic.reserve(108);
+
+    while (true) {
+        RAND_bytes((unsigned char*)seed, sizeof(seed));
+        for (int i = 0; i < words; i++) {
+            mnemonic += bip39_english[seed[i] % 2048];
+            if (i < words - 1) mnemonic += ' ';
+        }
+        if (crypto_blacknet_mnemonic_check_version(mnemonic))
+            break;
+        mnemonic.clear();
+    }
+
+    crypto_wipe(seed, sizeof(seed));
+    return mnemonic;
+}
+
+Value blacknetkeypair(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() > 0)
+        throw runtime_error(
+            "blacknetkeypair\n"
+            "Make a public/private key pair.\n");
+
+    SecureString mnemonic = crypto_blacknet_mnemonic();
+    uint8_t pk[32], sk[32];
+    assert(crypto_blacknet_mnemonic_keypair(mnemonic, pk, sk));
+    crypto_wipe(sk, sizeof(sk));
+
+    Object result;
+    result.push_back(Pair("Mnemonic (private key)", mnemonic.c_str()));
+    result.push_back(Pair("PublicKey", HexStr(BEGIN(pk), END(pk))));
+    return result;
+}
+
+Value burn(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw runtime_error(
+            "burn <amount> [hex string]\n"
+            "<amount> is a real and is rounded to the nearest 0.00000001"
+            + HelpRequiringPassphrase());
+
+    CScript scriptPubKey;
+
+    if (params.size() > 1) {
+        vector<unsigned char> data;
+        if (params[1].get_str().size() > 0){
+            data = ParseHexV(params[1], "data");
+        } else {
+            // Empty data is valid
+        }
+        scriptPubKey = CScript() << OP_RETURN << data;
+    } else {
+        scriptPubKey = CScript() << OP_RETURN;
+    }
+
+    // Amount
+    int64_t nAmount = AmountFromValue(params[0], true);
+
+    EnsureWalletIsUnlocked();
+
+    CWalletTx wtx;
+    string strError = pwalletMain->SendMoney(scriptPubKey, nAmount, wtx);
+    if (strError != "")
+        throw JSONRPCError(RPC_WALLET_ERROR, strError);
+
+    return wtx.GetHash().GetHex();
+}
+
+Value burnwallet(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw runtime_error(
+            "burnwallet [hex string] [force]"
+            + HelpRequiringPassphrase());
+
+    CScript scriptPubKey;
+
+    if (params.size() > 0) {
+        vector<unsigned char> data;
+        if (params[0].get_str().size() > 0){
+            data = ParseHexV(params[0], "data");
+        } else {
+            // Empty data is valid
+        }
+        scriptPubKey = CScript() << OP_RETURN << data;
+    } else {
+        scriptPubKey = CScript() << OP_RETURN;
+    }
+
+    bool fForce = false;
+    if (params.size() > 1)
+        fForce = params[1].get_bool();
+
+    EnsureWalletIsUnlocked();
+
+    if (!fForce) {
+        if (scriptPubKey.size() < 34)
+            throw JSONRPCError(RPC_WALLET_ERROR, "Warning: small data");
+        if (pwalletMain->GetUnconfirmedBalance() != 0)
+            throw JSONRPCError(RPC_WALLET_ERROR, "Warning: Unconfirmed Balance != 0");
+        if (pwalletMain->GetImmatureBalance() != 0)
+            throw JSONRPCError(RPC_WALLET_ERROR, "Warning: Immature Balance != 0");
+        if (pwalletMain->GetStake() != 0)
+            throw JSONRPCError(RPC_WALLET_ERROR, "Warning: Stake Balance != 0");
+    }
+
+    int64_t nAmount = pwalletMain->GetBalance();
+    std::vector<std::pair<CScript, int64_t> > vecSend;
+    vecSend.push_back(make_pair(scriptPubKey, nAmount));
+    CWalletTx wtx;
+    CReserveKey keyChange(pwalletMain);
+    int64_t nFeeRequired = 0;
+
+    pwalletMain->CreateTransaction(vecSend, wtx, keyChange, nFeeRequired);
+    vecSend[0].second -= nFeeRequired;
+    if (!pwalletMain->CreateTransaction(vecSend, wtx, keyChange, nFeeRequired))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Transaction creation failed");
+
+    if (!pwalletMain->CommitTransaction(wtx, keyChange))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Transaction commit failed");
 
     return wtx.GetHash().GetHex();
 }
@@ -590,7 +749,7 @@ Value sendfrom(const Array& params, bool fHelp)
     if (fHelp || params.size() < 3 || params.size() > 6)
         throw runtime_error(
             "sendfrom <fromaccount> <toblackcoinaddress> <amount> [minconf=1] [comment] [comment-to]\n"
-            "<amount> is a real and is rounded to the nearest 0.000001"
+            "<amount> is a real and is rounded to the nearest 0.00000001"
             + HelpRequiringPassphrase());
 
     string strAccount = AccountFromValue(params[0]);

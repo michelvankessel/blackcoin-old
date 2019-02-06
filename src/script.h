@@ -24,7 +24,8 @@ class CKeyStore;
 class CTransaction;
 
 static const unsigned int MAX_SCRIPT_ELEMENT_SIZE = 520; // bytes
-static const unsigned int MAX_OP_RETURN_RELAY = 40;      // bytes
+static const unsigned int MAX_OP_RETURN_RELAY = 15000;   // bytes
+extern unsigned nMaxDatacarrierBytes;
 
 /** Signature hash types/flags */
 enum
@@ -54,7 +55,6 @@ enum
 
     SCRIPT_VERIFY_STRICTENC = (1U << 3),
 
-    // TODO add to MANDATORY_SCRIPT_VERIFY_FLAGS after the IsProtocolV3 fork
     SCRIPT_VERIFY_ALLOW_EMPTY_SIG = (1U << 4),
     SCRIPT_VERIFY_FIX_HASHTYPE = (1U << 5),
 
@@ -78,6 +78,8 @@ enum isminetype
 // details.
 static const unsigned int MANDATORY_SCRIPT_VERIFY_FLAGS = SCRIPT_VERIFY_NULLDUMMY |
                                                           SCRIPT_VERIFY_STRICTENC |
+                                                          SCRIPT_VERIFY_ALLOW_EMPTY_SIG |
+                                                          SCRIPT_VERIFY_FIX_HASHTYPE |
                                                           SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
 
 // Standard script verification flags that standard transactions will comply
@@ -241,8 +243,8 @@ enum opcodetype
 
     // expansion
     OP_NOP1 = 0xb0,
-    OP_NOP2 = 0xb1,
-    OP_CHECKLOCKTIMEVERIFY = OP_NOP2,
+    OP_CHECKLOCKTIMEVERIFY = 0xb1,
+    OP_NOP2 = OP_CHECKLOCKTIMEVERIFY,
     OP_NOP3 = 0xb2,
     OP_NOP4 = 0xb3,
     OP_NOP5 = 0xb4,
@@ -719,6 +721,7 @@ public:
 
 
 bool IsDERSignature(const valtype &vchSig, bool haveHashType = true);
+bool IsLowDERSignature(const valtype &vchSig, bool haveHashType = true);
 bool IsCompressedOrUncompressedPubKey(const valtype &vchPubKey);
 bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, const CTransaction& txTo, unsigned int nIn, unsigned int flags, int nHashType);
 bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, std::vector<std::vector<unsigned char> >& vSolutionsRet);
